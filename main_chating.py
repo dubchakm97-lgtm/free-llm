@@ -1,7 +1,9 @@
+import re
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
+import html
 from openai import OpenAI
 import requests
 
@@ -56,7 +58,8 @@ def send_telegram_message(chat_id: int, message: str):
         f"{Telegram_API}/sendMessage",
         json={
             "chat_id": chat_id,
-            "text": message[:4000]
+            "text": message[:4000],
+            "parse_mode": "HTML"
         },
         timeout=10
     )
@@ -64,24 +67,47 @@ def send_telegram_message(chat_id: int, message: str):
     print("sendMessage body:", response.text)
 
 
+def format_for_telegram(answer: str) -> str:
+    pattern = r"```(?:[a-zA-Z0-9_+-]*)?\n(.*?)```"
+    parts = []
+    last_end = 0
+
+    for match in re.finditer(pattern, answer, flags=re.DOTALL):
+        start, end = match.span()
+
+        # обычный текст до блока кода
+        plain_text = answer[last_end:start]
+        if plain_text:
+            parts.append(html.escape(plain_text))
+
+        # содержимое блока кода
+        code_text = match.group(1).rstrip("\n")
+        parts.append(f"<pre><code>{html.escape(code_text)}</code></pre>")
+
+        last_end = end
+
+    # хвост после последнего блока кода
+    tail = answer[last_end:]
+    if tail:
+        parts.append(html.escape(tail))
+
+    body = "".join(parts)
+    return f"<b>Ответ:</b>\n\n{body}"
+
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     data = await request.json()
-    print("UPDATE:", data)
 
     message = data.get("message")
     if not message:
-        print("No message in update")
         return {"ok": True}
 
     chat_id = message["chat"]["id"]
     text = message.get("text", "").strip()
 
-    print("chat_id:", chat_id)
-    print("text:", text)
-
     if text == "/start":
-        send_telegram_message(chat_id, "Привет! Напиши что-нибудь.")
+        send_telegram_message(chat_id, "<b>Привет!</b>\nНапиши что-нибудь.")
         return {"ok": True}
 
     if not text:
@@ -90,8 +116,11 @@ async def telegram_webhook(request: Request):
 
     try:
         answer = get_llm_answer(text)
-        print("ANSWER:", answer)
-        send_telegram_message(chat_id, answer)
+
+        formatted = format_for_telegram(answer)
+
+        send_telegram_message(chat_id, formatted)
+
     except Exception as e:
         print("ERROR:", str(e))
         send_telegram_message(chat_id, "Ошибка при обработке запроса")
